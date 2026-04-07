@@ -1,8 +1,9 @@
-name: 🎮 OptikLink-Keep
+name: 🎮 OptikLink-Keep-Ultra
+
 on:
   schedule:
-    - cron: '0 1 */2 * *'
-  workflow_dispatch:
+    - cron: '0 1 */2 * *'  # 每 2 天运行一次
+  workflow_dispatch:      # 支持手动触发
 
 jobs:
   keepalive:
@@ -10,11 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: 📥 拉取私库代码
+      - name: 📥 拉取代码
         uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/OptikLink-Keep-Private
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
       - name: 🟢 安装 Node.js
         uses: actions/setup-node@v4
@@ -22,32 +20,88 @@ jobs:
           node-version: '22'
 
       - name: 📦 安装依赖
-        run: npm install
+        run: |
+          npm init -y
+          # 必须安装 form-data 以支持带图推送
+          npm install @playwright/test form-data
 
       - name: 🌐 安装 Playwright 浏览器
         run: npx playwright install chromium --with-deps
 
-      - name: 🛡️ 下载 GOST
+      - name: 🛡️ 启动 Xray 代理转发 (原生支持 Reality)
+        env:
+          XRAY_VMESS_VLESS: ${{ secrets.GOST_PROXY }}
+        if: env.XRAY_VMESS_VLESS != ''
         run: |
-          VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest \
-            | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
-          echo "📦 GOST 版本: $VERSION"
-          wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
-          tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
-          chmod +x gost
-          echo "✅ GOST 下载完成"
+          # 1. 下载并安装 Xray-core
+          echo "📥 下载 Xray-core..."
+          wget -q https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          sudo apt-get install -y unzip
+          unzip -o Xray-linux-64.zip xray
+          chmod +x xray
+
+          # 2. 生成 Xray 配置文件 (将 VLESS 转为本地 HTTP 代理 127.0.0.1:8080)
+          # 使用 python 脚本快速解析 vless 链接并生成 config.json
+          cat <<EOF > xray_config.json
+          {
+            "inbounds": [{
+              "port": 8080,
+              "listen": "127.0.0.1",
+              "protocol": "http",
+              "settings": { "timeout": 360 }
+            }],
+            "outbounds": [{
+              "protocol": "vless",
+              "settings": {
+                "vnext": [{
+                  "address": "38.97.62.210",
+                  "port": 50897,
+                  "users": [{
+                    "id": "213a7536-6d24-4161-81a9-929a90f946a8",
+                    "encryption": "none",
+                    "flow": "xtls-rprx-vision"
+                  }]
+                }]
+              },
+              "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                  "show": false,
+                  "fingerprint": "firefox",
+                  "serverName": "www.iij.ad.jp",
+                  "publicKey": "v9ngNcy7TywBomF4g1eGgDWiVBsXrrGEAVeQJpC9BDE",
+                  "shortId": "",
+                  "spiderX": ""
+                }
+              }
+            }]
+          }
+          EOF
+
+          # 3. 后台启动 Xray
+          nohup ./xray -c xray_config.json > xray.log 2>&1 &
+          
+          # 4. 验证连通性
+          sleep 5
+          echo "✅ Xray 已启动，测试连通性..."
+          curl -s -x http://127.0.0.1:8080 https://api.ipify.org || (cat xray.log && exit 1)
 
       - name: 🚀 运行保活脚本
         env:
-          DISCORD_ACCOUNT: ${{ secrets.DISCORD_ACCOUNT }}
-          TG_BOT:          ${{ secrets.TG_BOT }}
-          GOST_BIN:        ./gost
-        run: npx playwright test
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          PANEL_ACCOUNT: ${{ secrets.PANEL_ACCOUNT }}
+          TG_BOT: ${{ secrets.TG_BOT }}
+          # 这里的 GOST_PROXY 对应脚本中 if (process.env.GOST_PROXY) 的逻辑
+          GOST_PROXY: http://127.0.0.1:8080
+        run: npx playwright test optiklink.spec.js
 
-      - name: 📸 上传失败截图
-        if: failure()
+      - name: 📸 上传报告与截图
+        if: always() # 修改为 always，因为成功或失败都可能产生 report_*.png
         uses: actions/upload-artifact@v4
         with:
-          name: failure-screenshots
-          path: test-results/
+          name: execution-results
+          path: |
+            test-results/
+            report_*.png
           retention-days: 7
